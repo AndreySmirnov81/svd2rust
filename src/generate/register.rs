@@ -219,6 +219,9 @@ pub fn render_register_mod(
         methods.push("modify");
     }
 
+    let mut zero_to_modify_fields_bitmap: u64 = 0;
+    let mut one_to_modify_fields_bitmap: u64 = 0;
+
     if let Some(cur_fields) = register.fields.as_ref() {
         // filter out all reserved fields, as we should not generate code for
         // them
@@ -240,6 +243,8 @@ pub fn render_register_mod(
                 &mut mod_items,
                 &mut r_impl_items,
                 &mut w_impl_items,
+                &mut zero_to_modify_fields_bitmap,
+                &mut one_to_modify_fields_bitmap,
                 config,
             )?;
         }
@@ -343,21 +348,32 @@ pub fn render_register_mod(
     if can_write {
         let doc =
             format!("`write(|w| ..)` method takes [{name_snake_case}::W](W) writer structure",);
+
+        let zero_to_modify_fields_bitmap = (zero_to_modify_fields_bitmap != 0).then(|| {
+            let val = util::hex(zero_to_modify_fields_bitmap);
+            quote! { const ZERO_TO_MODIFY_FIELDS_MASK: Self::Ux = #val; }
+        });
+        let one_to_modify_fields_bitmap = (one_to_modify_fields_bitmap != 0).then(|| {
+            let val = util::hex(one_to_modify_fields_bitmap);
+            quote! { const ONE_TO_MODIFY_FIELDS_MASK: Self::Ux = #val; }
+        });
+
         mod_items.extend(quote! {
             #[doc = #doc]
             impl crate::Writable for #name_constant_case_spec {
                 type Writer = W;
+                #zero_to_modify_fields_bitmap;
+                #one_to_modify_fields_bitmap;
             }
         });
     }
-    if let Some(rv) = properties.reset_value.map(util::hex) {
-        let rv = rv.into_token_stream();
+    if let Some(rv) = properties.reset_value {
         let doc = format!("`reset()` method sets {} to value {rv}", register.name);
+        let rv = util::hex(rv);
         mod_items.extend(quote! {
             #[doc = #doc]
             impl crate::Resettable for #name_constant_case_spec {
-                #[inline(always)]
-                fn reset_value() -> Self::Ux { #rv }
+                const RESET_VALUE: Self::Ux = #rv;
             }
         });
     }
@@ -377,6 +393,8 @@ pub fn fields(
     mod_items: &mut TokenStream,
     r_impl_items: &mut TokenStream,
     w_impl_items: &mut TokenStream,
+    zero_to_modify_fields_bitmap: &mut u64,
+    one_to_modify_fields_bitmap: &mut u64,
     config: &Config,
 ) -> Result<()> {
     let span = Span::call_site();
@@ -837,19 +855,16 @@ pub fn fields(
             // derive writer structure by type alias to generic write proxy structure.
             if should_derive_writer {
                 let proxy = if width == 1 {
+                    use ModifiedWriteValues::*;
                     let wproxy = Ident::new(
                         match mwv {
-                            ModifiedWriteValues::Modify => "BitWriter",
-                            ModifiedWriteValues::OneToSet | ModifiedWriteValues::Set => {
-                                "BitWriter1S"
-                            }
-                            ModifiedWriteValues::ZeroToClear | ModifiedWriteValues::Clear => {
-                                "BitWriter0C"
-                            }
-                            ModifiedWriteValues::OneToClear => "BitWriter1C",
-                            ModifiedWriteValues::ZeroToSet => "BitWriter0C",
-                            ModifiedWriteValues::OneToToggle => "BitWriter1T",
-                            ModifiedWriteValues::ZeroToToggle => "BitWriter0T",
+                            Modify | Set | Clear => "BitWriter",
+                            OneToSet => "BitWriter1S",
+                            ZeroToClear => "BitWriter0C",
+                            OneToClear => "BitWriter1C",
+                            ZeroToSet => "BitWriter0C",
+                            OneToToggle => "BitWriter1T",
+                            ZeroToToggle => "BitWriter0T",
                         },
                         span,
                     );
@@ -964,6 +979,18 @@ pub fn fields(
                         #writer_ty::new(self)
                     }
                 });
+            }
+            if width == 1 {
+                use ModifiedWriteValues::*;
+                match mwv {
+                    Modify | Set | Clear => {}
+                    OneToSet | OneToClear | OneToToggle => {
+                        *one_to_modify_fields_bitmap |= 1 << offset;
+                    }
+                    ZeroToClear | ZeroToSet | ZeroToToggle => {
+                        *zero_to_modify_fields_bitmap |= 1 << offset;
+                    }
+                }
             }
         }
     }

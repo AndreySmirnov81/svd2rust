@@ -16,12 +16,15 @@ pub trait Readable: RegisterSpec {
 
 /// Trait implemented by writeable registers.
 ///
-/// This enables the  `write`, `write_with_zero` and `reset` methods.
+/// This enables the `write`, `write_with_zero` and `reset` methods.
 ///
 /// Registers marked with `Readable` can be also `modify`'ed.
 pub trait Writable: RegisterSpec {
     /// Writer type argument to `write`, et al.
     type Writer: From<W<Self>> + core::ops::DerefMut<Target = W<Self>>;
+
+    const ZERO_TO_MODIFY_FIELDS_BITMAP: Self::Ux = 0;
+    const ONE_TO_MODIFY_FIELDS_BITMAP: Self::Ux = 0;
 }
 
 /// Reset value of the register.
@@ -30,7 +33,13 @@ pub trait Writable: RegisterSpec {
 /// register by using the `reset` method.
 pub trait Resettable: RegisterSpec {
     /// Reset value of the register.
-    fn reset_value() -> Self::Ux;
+    const RESET_VALUE: Self::Ux;
+
+    /// Reset value of the register.
+    #[inline(always)]
+    fn reset_value() -> Self::Ux {
+        Self::RESET_VALUE
+    }
 }
 
 /// This structure provides volatile access to registers.
@@ -115,7 +124,7 @@ impl<REG: Resettable + Writable> Reg<REG> {
     {
         self.register.set(
             f(&mut REG::Writer::from(W {
-                bits: REG::reset_value(),
+                bits: REG::RESET_VALUE & !REG::ONE_TO_MODIFY_FIELDS_BITMAP | REG::ZERO_TO_MODIFY_FIELDS_BITMAP,
                 _reg: marker::PhantomData,
             }))
             .bits,
@@ -130,9 +139,9 @@ where
     /// Writes 0 to a `Writable` register.
     ///
     /// Similar to `write`, but unused bits will contain 0.
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// Unsafe to use with registers which don't allow to write 0.
     #[inline(always)]
     pub unsafe fn write_with_zero<F>(&self, f: F)
@@ -188,7 +197,7 @@ impl<REG: Readable + Writable> Reg<REG> {
                     _reg: marker::PhantomData,
                 }),
                 &mut REG::Writer::from(W {
-                    bits,
+                    bits: bits & !REG::ONE_TO_MODIFY_FIELDS_BITMAP | REG::ZERO_TO_MODIFY_FIELDS_BITMAP,
                     _reg: marker::PhantomData,
                 }),
             )
@@ -236,9 +245,9 @@ pub struct W<REG: RegisterSpec + ?Sized> {
 
 impl<REG: RegisterSpec> W<REG> {
     /// Writes raw bits to the register.
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// Read datasheet or reference manual to find what values are allowed to pass.
     #[inline(always)]
     pub unsafe fn bits(&mut self, bits: REG::Ux) -> &mut Self {
